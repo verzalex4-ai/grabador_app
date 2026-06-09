@@ -155,6 +155,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     try {
       await _requestPermissions();
 
+      // 1. Pedir permiso MediaProjection
       final projResult = await _channel.invokeMapMethod<String, dynamic>('requestMediaProjection');
       if (projResult == null || projResult['granted'] != true) {
         _showSnack('Permiso de captura de pantalla denegado');
@@ -167,13 +168,20 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       final dpi = metrics != null ? metrics['density'] as int : 320;
       final filePath = _generateFileName();
 
-      await _channel.invokeMethod('startRecording', {
+      // 2. Iniciar grabación inmediatamente (el token es válido ahora)
+      final success = await _channel.invokeMethod<bool>('startRecording', {
         'width': res['width'],
         'height': res['height'],
         'dpi': dpi,
         'audioSource': _audioSource,
         'outputPath': filePath,
       });
+
+      if (success != true) {
+        _showSnack('No se pudo iniciar la grabación');
+        setState(() => _isPreparing = false);
+        return;
+      }
 
       setState(() {
         _isRecording = true;
@@ -186,7 +194,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       });
     } catch (e) {
       setState(() => _isPreparing = false);
-      _showSnack('Error: $e');
+      _showSnack('Error al iniciar: ${e.toString().replaceAll('PlatformException', '')}');
     }
   }
 
@@ -475,16 +483,53 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
   Future<void> _pickFolder() async {
     try {
-      final dir = await getExternalStorageDirectory();
-      if (dir != null && mounted) {
-        setState(() => _outputPath = '${dir.path}/ScreenRecordings');
-        _showSnack('Carpeta: $_outputPath');
+      // Opciones de carpetas disponibles
+      final dirs = <String, String>{};
+
+      final extDir = await getExternalStorageDirectory();
+      if (extDir != null) {
+        dirs['Almacenamiento App'] = '${extDir.path}/ScreenRecordings';
+      }
+
+      // Ruta pública de Movies (visible en galería)
+      const moviesPath = '/storage/emulated/0/Movies/ScreenRecordings';
+      dirs['Movies (Galería)'] = moviesPath;
+
+      const dcimPath = '/storage/emulated/0/DCIM/ScreenRecordings';
+      dirs['DCIM'] = dcimPath;
+
+      if (!mounted) return;
+
+      final selected = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: _card,
+          title: const Text('Elegir carpeta',
+              style: TextStyle(color: _textPrimary, fontSize: 16)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: dirs.entries.map((e) => ListTile(
+              title: Text(e.key,
+                  style: const TextStyle(color: _textPrimary, fontSize: 14)),
+              subtitle: Text(e.value,
+                  style: const TextStyle(color: _textSecondary, fontSize: 11)),
+              onTap: () => Navigator.pop(ctx, e.value),
+            )).toList(),
+          ),
+        ),
+      );
+
+      if (selected != null && mounted) {
+        final folder = Directory(selected);
+        if (!await folder.exists()) await folder.create(recursive: true);
+        setState(() => _outputPath = selected);
+        _showSnack('✓ Carpeta: $selected');
       }
     } catch (e) {
-      _showSnack('No se pudo cambiar la carpeta');
+      _showSnack('Error al cambiar carpeta: $e');
     }
   }
-
+  
   Widget _buildFAB() {
     return FloatingActionButton(
       onPressed: _isPreparing ? null : _toggleRecording,

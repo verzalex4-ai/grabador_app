@@ -8,8 +8,6 @@ import android.media.*
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.*
-import android.util.DisplayMetrics
-import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import java.io.File
 import java.text.SimpleDateFormat
@@ -32,7 +30,7 @@ class RecordingService : Service() {
         const val EXTRA_WIDTH = "width"
         const val EXTRA_HEIGHT = "height"
         const val EXTRA_DPI = "dpi"
-        const val EXTRA_AUDIO_SOURCE = "audio_source"  // "mic", "system", "both", "none"
+        const val EXTRA_AUDIO_SOURCE = "audio_source"
         const val EXTRA_OUTPUT_PATH = "output_path"
     }
 
@@ -74,7 +72,11 @@ class RecordingService : Service() {
         val projManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         mediaProjection = projManager.getMediaProjection(resultCode, resultData)
 
-        setupMediaRecorder(width, height, dpi, audioSource)
+        try {
+            setupMediaRecorder(width, height, dpi, audioSource)
+        } catch (e: Exception) {
+            stopSelf()
+        }
     }
 
     private fun setupMediaRecorder(width: Int, height: Int, dpi: Int, audioSource: String) {
@@ -85,30 +87,32 @@ class RecordingService : Service() {
             MediaRecorder()
         }
 
+        val useAudio = when (audioSource) {
+            "mic", "both" -> true
+            "system" -> Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+            else -> false
+        }
+
         mediaRecorder?.apply {
-            // Audio
-            when (audioSource) {
-                "mic" -> {
-                    setAudioSource(MediaRecorder.AudioSource.MIC)
-                }
-                "system" -> {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        setAudioSource(MediaRecorder.AudioSource.REMOTE_SUBMIX)
-                    }
-                }
-                "both" -> {
-                    setAudioSource(MediaRecorder.AudioSource.MIC)
-                }
-                // "none" -> no audio
+            if (useAudio) {
+                val src = if (audioSource == "system" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                    MediaRecorder.AudioSource.REMOTE_SUBMIX
+                else
+                    MediaRecorder.AudioSource.MIC
+                try {
+                    setAudioSource(src)
+                } catch (e: Exception) { /* continuar sin audio */ }
             }
 
             setVideoSource(MediaRecorder.VideoSource.SURFACE)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
 
-            if (audioSource != "none") {
-                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setAudioEncodingBitRate(128000)
-                setAudioSamplingRate(44100)
+            if (useAudio) {
+                try {
+                    setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                    setAudioEncodingBitRate(128000)
+                    setAudioSamplingRate(44100)
+                } catch (e: Exception) { /* continuar sin audio */ }
             }
 
             setVideoEncoder(MediaRecorder.VideoEncoder.H264)
@@ -117,7 +121,11 @@ class RecordingService : Service() {
             setVideoEncodingBitRate(5 * 1000 * 1000)
             setOutputFile(outputPath)
 
-            prepare()
+            try {
+                prepare()
+            } catch (e: Exception) {
+                throw RuntimeException("Error al preparar: ${e.message}")
+            }
         }
 
         virtualDisplay = mediaProjection?.createVirtualDisplay(
@@ -125,10 +133,10 @@ class RecordingService : Service() {
             width, height, dpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             mediaRecorder?.surface, null, null
-        )
+        ) ?: throw RuntimeException("No se pudo crear VirtualDisplay")
 
         mediaRecorder?.start()
-    }
+    }  // <-- cierre de setupMediaRecorder
 
     private fun stopRecording() {
         try {
@@ -141,11 +149,19 @@ class RecordingService : Service() {
         mediaProjection?.stop()
         mediaProjection = null
 
-        // Notificar al sistema que hay un video nuevo
         if (outputPath.isNotEmpty()) {
-            sendBroadcast(Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE).apply {
-                data = android.net.Uri.fromFile(File(outputPath))
-            })
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    MediaScannerConnection.scanFile(
+                        this, arrayOf(outputPath), arrayOf("video/mp4"), null
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    sendBroadcast(Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE).apply {
+                        data = android.net.Uri.fromFile(File(outputPath))
+                    })
+                }
+            } catch (e: Exception) { /* ignorar */ }
         }
     }
 
